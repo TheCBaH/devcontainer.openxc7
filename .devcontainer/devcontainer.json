@@ -1,0 +1,7 @@
+{
+  "name": "openXC7 musl builder",
+  "build": {"dockerfile": "Dockerfile", "context": ".."},
+  "features": {"ghcr.io/devcontainers/features/sshd:1": {}},
+  "remoteUser": "root",
+  "postCreateCommand": "make submodule"
+}

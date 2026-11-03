@@ -1,0 +1,74 @@
+name: build
+on:
+  push:
+    branches: [devel]
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  images:
+    uses: ./.github/workflows/images.yml
+    secrets: inherit
+  tools:
+    needs: images
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        tool: [yosys, nextpnr, assembler]
+        include:
+          - tool: yosys
+            backend: cmake
+          - tool: nextpnr
+            backend: cmake
+          - tool: assembler
+            backend: bazel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          persist-credentials: false
+      - name: Initialize pinned sources
+        run: make submodule TOOL=${{ matrix.tool }}
+      - name: Login for cached dependency image
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+      - name: Development container
+        id: container
+        uses: TheCBaH/devcontainer-action/devcontainer@v1
+        with:
+          cli-version: '0.88.0'
+          post-create: 'false'
+      - uses: actions/cache/restore@v6
+        id: cache
+        with:
+          path: |
+            .cache/ccache
+            .cache/bazel-repos
+            .cache/bazel-actions
+          key: ${{ matrix.backend }}-${{ matrix.tool }}-${{ runner.arch }}-${{ github.sha }}
+          restore-keys: |
+            ${{ matrix.backend }}-${{ matrix.tool }}-${{ runner.arch }}-
+      - name: Build static tool and sources
+        run: ${{ steps.container.outputs.exec }} make build TOOL=${{ matrix.tool }}
+      - uses: actions/cache/save@v6
+        if: always() && steps.cache.outputs.cache-primary-key != '' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            .cache/ccache
+            .cache/bazel-repos
+            .cache/bazel-actions
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.tool }}-${{ runner.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error

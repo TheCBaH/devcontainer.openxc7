@@ -1,0 +1,12 @@
+[submodule "yosys"]
+	path = sources/yosys
+	url = https://github.com/YosysHQ/yosys.git
+[submodule "nextpnr"]
+	path = sources/nextpnr
+	url = https://github.com/openXC7/nextpnr.git
+[submodule "assembler"]
+	path = sources/assembler
+	url = https://github.com/hansfbaier/fpga-assembler.git
+[submodule "prjxray-db"]
+	path = sources/prjxray-db
+	url = https://github.com/f4pga/prjxray-db.git
