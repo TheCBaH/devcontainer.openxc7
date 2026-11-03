@@ -103,3 +103,8 @@ Use the native `nextpnr-himbaechel --device <part> --chipdb
 /opt/openxc7/share/chipdb/<device>.bin -o xdc=<file> -o fasm=<file>`
 interface.
 Full Vivado Tcl is not supported by nextpnr's XDC reader.
+
+Releases require complete static and bitstream checks. Push a `v*` tag at a
+`devel` commit whose `build` run succeeded to publish that run's archives
+and tag its runtime image, without rebuilding. Tag before the run's
+artifacts expire. This leaves the empty `main` unchanged.
