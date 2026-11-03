@@ -72,3 +72,243 @@ jobs:
           name: ${{ matrix.tool }}-${{ runner.arch }}
           path: dist/*.tar.gz
           if-no-files-found: error
+  databases:
+    needs: [tools, images]
+    strategy:
+      fail-fast: false
+      matrix:
+        family: [artix7, kintex7, spartan7, virtex7, zynq7]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - name: Database cache identity
+        id: identity
+        run: |
+          pins() { git ls-tree HEAD "$@" | sha256sum | cut -d' ' -f1; }
+          echo "tables=$(pins sources/nextpnr sources/prjxray-db)" >> "$GITHUB_OUTPUT"
+          echo "tools=$(pins sources/yosys sources/assembler)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v6
+        id: cache
+        with:
+          path: .cache/databases/${{ matrix.family }}
+          key: data-v1-${{ matrix.family }}-${{ steps.identity.outputs.tables }}-${{ steps.identity.outputs.tools }}-${{ hashFiles('Dockerfile', 'devices.json', 'scripts/build-databases.sh', 'scripts/database-metadata.py', 'scripts/verify-tables.py', 'scripts/smoke-device.sh') }}
+          restore-keys: data-v1-${{ matrix.family }}-${{ steps.identity.outputs.tables }}-
+      - uses: actions/download-artifact@v8
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: artifacts
+          pattern: '*-${{ runner.arch }}'
+      - name: Select cached database builder
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          directory='.cache/databases/${{ matrix.family }}'
+          mkdir -p "$directory" cached-databases
+          cp -a "$directory" cached-databases/
+          rm -rf "$directory"
+          mkdir -p "$directory"
+          image='${{ needs.images.outputs.image }}'
+          echo "DEPS_IMAGE=${image/ARCH/amd64}" >> "$GITHUB_ENV"
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+      - uses: docker/setup-buildx-action@v4
+        if: steps.cache.outputs.cache-hit != 'true'
+      - name: Generate shared databases in dedicated builder
+        id: generate
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: database-export
+          build-args: |
+            DEPS_IMAGE=${{ env.DEPS_IMAGE }}
+            SOURCE_COMMIT=${{ github.sha }}
+            FAMILY=${{ matrix.family }}
+            TOOLS_ARCH=${{ runner.arch }}
+          outputs: type=local,dest=.cache/databases/${{ matrix.family }}
+      - name: Preserve database build provenance
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          directory='.cache/databases/${{ matrix.family }}'
+          if test -f "$directory/provenance.json"; then
+            mv "$directory/provenance.json" "$directory/provenance-data-${{ matrix.family }}.json"
+          fi
+      - name: Select table cache key
+        id: save
+        if: steps.cache.outputs.cache-hit != 'true' && steps.generate.conclusion == 'success'
+        run: |
+          key='${{ steps.cache.outputs.cache-primary-key }}'
+          if test -e '.cache/databases/${{ matrix.family }}/FAILED-${{ matrix.family }}'; then
+            key="$key-failed-${{ github.run_id }}-${{ github.run_attempt }}"
+          fi
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - name: Cache tables before reporting smoke failures
+        if: steps.save.conclusion == 'success'
+        uses: actions/cache/save@v6
+        with:
+          path: .cache/databases/${{ matrix.family }}
+          key: ${{ steps.save.outputs.key }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: database-${{ matrix.family }}
+          path: .cache/databases/${{ matrix.family }}/*
+          if-no-files-found: error
+      - name: Require every device smoke test to pass
+        run: |
+          failures='.cache/databases/${{ matrix.family }}/FAILED-${{ matrix.family }}'
+          if test -s "$failures"; then
+            echo 'Device smoke tests failed:'
+            cat "$failures"
+            exit 1
+          fi
+  package:
+    needs: [tools, images, databases]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+            asset: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            asset: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: '*-${{ runner.arch }}'
+      - uses: actions/download-artifact@v8
+        with:
+          name: database-artix7
+          path: artifacts/database
+      - name: Select native artifacts and dependency image
+        run: |
+          for tool in yosys nextpnr assembler; do
+            mv "artifacts/$tool-${{ runner.arch }}" "artifacts/$tool"
+          done
+          image='${{ needs.images.outputs.image }}'
+          echo "DEPS_IMAGE=${image/ARCH/${{ matrix.arch }}}" >> "$GITHUB_ENV"
+      - name: Login
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+      - uses: docker/setup-buildx-action@v4
+      - name: Assemble artifacts in dedicated builder
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: archive-export
+          build-args: |
+            DEPS_IMAGE=${{ env.DEPS_IMAGE }}
+            SOURCE_COMMIT=${{ github.sha }}
+          outputs: type=local,dest=dist
+      - name: Test offline on glibc and musl
+        run: |
+          mkdir runtime
+          tar -xJf dist/openxc7-linux-${{ matrix.asset }}-musl.tar.xz -C runtime
+          tar -xJf artifacts/database/openxc7-data-xc7a50t.tar.xz -C runtime
+          if test -f dist/provenance.json; then
+            mv dist/provenance.json dist/provenance-${{ matrix.asset }}.json
+          fi
+          {
+            echo "Commit: $GITHUB_SHA"
+            echo "Runner architecture: $(uname -m)"
+            for image in debian:bookworm-slim alpine:3.22; do
+              docker pull "$image"
+              docker image inspect "$image" --format '{{json .RepoDigests}}'
+              docker run --rm --network none --user 65534:65534 --read-only \
+                --tmpfs /tmp:rw,exec,size=1g \
+                -v "$PWD/runtime:/opt/openxc7:ro" \
+                -v "$PWD/scripts/smoke.sh:/smoke.sh:ro" "$image" sh /smoke.sh
+            done
+          } 2>&1 | tee verification.log
+          xz -T2 -6e -c verification.log > dist/verification-${{ matrix.asset }}.log.xz
+          (cd dist; sha256sum *.tar.xz *.json *.txt *.log.xz SHA256SUMS-* > VERIFICATION-SHA256SUMS-${{ matrix.asset }})
+      - name: Publish runtime image from builder artifacts
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: runtime
+          build-args: |
+            DEPS_IMAGE=${{ env.DEPS_IMAGE }}
+            SOURCE_COMMIT=${{ github.sha }}
+          push: true
+          tags: |
+            ghcr.io/thecbah/devcontainer.openxc7:runtime-${{ github.sha }}-${{ matrix.arch }}
+            ghcr.io/thecbah/devcontainer.openxc7:${{ github.ref_name }}-${{ matrix.arch }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: runtime-linux-${{ matrix.asset }}-musl
+          path: dist/*
+          if-no-files-found: error
+  verify-databases:
+    needs: [package, databases]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            asset: x86_64
+          - runner: ubuntu-24.04-arm
+            asset: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: runtime-linux-${{ matrix.asset }}-musl
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: database-*
+          path: dist
+          merge-multiple: true
+      - name: Verify identical databases on both CPUs
+        run: |
+          mkdir runtime
+          tar -xJf dist/openxc7-linux-${{ matrix.asset }}-musl.tar.xz -C runtime
+          for checksums in dist/SHA256SUMS-data-*; do
+            (cd dist; sha256sum -c "${checksums#dist/}")
+          done
+          for archive in dist/openxc7-data-*.tar.xz; do
+            tar -xJf "$archive" -C runtime
+          done
+          {
+            echo "Commit: $GITHUB_SHA"
+            echo "Runner architecture: $(uname -m)"
+            sha256sum dist/openxc7-data-*.tar.xz
+            for image in debian:bookworm-slim alpine:3.22; do
+              docker pull "$image"
+              docker image inspect "$image" --format '{{json .RepoDigests}}'
+              docker run --rm --network none --user 65534:65534 --read-only \
+                --tmpfs /tmp:rw,exec,size=1g \
+                -v "$PWD/runtime:/opt/openxc7:ro" \
+                -v "$PWD/scripts/smoke-device.sh:/smoke-device.sh:ro" \
+                -v "$PWD/scripts/smoke-databases.sh:/smoke-databases.sh:ro" \
+                "$image" sh /smoke-databases.sh
+            done
+          } 2>&1 | tee database-verification.log
+          xz -T2 -6e -c database-verification.log > database-verification-${{ matrix.asset }}.log.xz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: database-verification-${{ matrix.asset }}
+          path: database-verification-*.log.xz
+          if-no-files-found: error
+  runtime-index:
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Login
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+      - uses: docker/setup-buildx-action@v4
+      - name: Publish multi-architecture runtime index
+        run: |
+          image=ghcr.io/thecbah/devcontainer.openxc7
+          docker buildx imagetools create \
+            -t "$image:runtime-${{ github.sha }}" -t "$image:${{ github.ref_name }}" \
+            "$image:runtime-${{ github.sha }}-amd64" "$image:runtime-${{ github.sha }}-arm64"
