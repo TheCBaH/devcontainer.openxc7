@@ -39,6 +39,11 @@ jobs:
           persist-credentials: false
       - name: Initialize pinned sources
         run: make submodule TOOL=${{ matrix.tool }}
+      - uses: actions/cache/restore@v6
+        with:
+          path: .deps
+          key: deps-${{ runner.arch }}-${{ hashFiles('versions.env', 'scripts/fetch-dependencies.sh') }}
+          fail-on-cache-miss: true
       - name: Login for cached dependency image
         run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
       - name: Development container

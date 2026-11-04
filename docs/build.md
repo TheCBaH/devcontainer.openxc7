@@ -22,7 +22,12 @@ The reusable `images.yml` job uses
 `TheCBaH/devcontainer-action/devcontainer@v1` to publish/cache the Debian
 dependency image. The `build.yml` jobs use that helper to consume the image
 and build the pinned Yosys, nextpnr and fpga-as submodules independently.
-Moving a source submodule does not change the dependency image. Compiler and
+Moving a source submodule does not change the dependency image.
+`scripts/fetch-dependencies.sh` downloads the dependency sources pinned in
+`versions.env` into `.deps`, which the image build reads without network
+access. Actions caches `.deps` per architecture, keyed on `versions.env` and
+that script, so external hosts are contacted only when a pin changes;
+`initializeCommand` fetches it for Codespaces and local builds. Compiler and
 Bazel caches survive individual source build failures. Actions uses separate
 `cmake-<tool>-<arch>` and `bazel-<tool>-<arch>` cache keys. CMake uses
 `.cache/ccache`; Bazel uses `.cache/bazel-repos` and `.cache/bazel-actions`.

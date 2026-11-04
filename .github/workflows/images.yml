@@ -26,6 +26,19 @@ jobs:
         with:
           submodules: false
           persist-credentials: false
+      - uses: actions/cache/restore@v6
+        id: deps
+        with:
+          path: .deps
+          key: deps-${{ runner.arch }}-${{ hashFiles('versions.env', 'scripts/fetch-dependencies.sh') }}
+      - name: Download pinned dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: scripts/fetch-dependencies.sh
+      - uses: actions/cache/save@v6
+        if: steps.deps.outputs.cache-hit != 'true'
+        with:
+          path: .deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
       - name: Development container
         id: container
         uses: TheCBaH/devcontainer-action/devcontainer@v1

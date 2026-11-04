@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 FROM base AS dependency-builder
 COPY versions.env /src/versions.env
 COPY scripts/dependencies.sh /src/dependencies.sh
+COPY .deps /src/deps
 RUN bash /src/dependencies.sh
 FROM base AS deps
 COPY --from=dependency-builder /opt/sdk /opt/sdk
