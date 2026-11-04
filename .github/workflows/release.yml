@@ -13,13 +13,13 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - name: Download artifacts of the validated devel build
+      - name: Download artifacts of the validated build
         run: |
-          run=$(gh run list --workflow build.yml --branch devel --event push \
+          run=$(gh run list --workflow build.yml --event push \
             --commit "$GITHUB_SHA" --status success --limit 1 \
             --json databaseId --jq '.[0].databaseId')
           if test -z "$run"; then
-            echo "No successful devel build of $GITHUB_SHA" >&2
+            echo "No successful build of $GITHUB_SHA" >&2
             exit 1
           fi
           echo "Publishing artifacts of build run $run"
